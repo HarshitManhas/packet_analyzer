@@ -587,13 +587,3 @@ All dependencies are managed via Maven and downloaded automatically during build
 - [x] **Flow-Level Blocking** — Once a flow is blocked, all subsequent packets are dropped
 - [x] **CLI Arguments** — Command-line flags for blocking rules
 
----
-
-## 📄 License
-
-This project is open source and available under the [MIT License](LICENSE).
-
----
-
-> **Note:** This Java implementation is inspired by DPI Engine architecture principles for educational and research purposes.
-
