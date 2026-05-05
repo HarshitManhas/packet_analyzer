@@ -1,6 +1,5 @@
 package com.packetanalyzer.engine;
 
-import com.packetanalyzer.model.AppType;
 import com.packetanalyzer.model.Connection;
 import com.packetanalyzer.model.FiveTuple;
 import com.packetanalyzer.model.PacketInfo;
@@ -10,7 +9,7 @@ import org.slf4j.LoggerFactory;
 import java.util.Map;
 import java.util.concurrent.BlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.LinkedBlockingQueue;
+
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -20,11 +19,11 @@ import java.util.concurrent.atomic.AtomicLong;
  * packets assigned to it via consistent hashing.
  *
  * Matches the C++ FastPath thread from dpi_mt.cpp:
- *   - Pops packets from its input queue
- *   - Looks up flow in local flow table
- *   - Classifies traffic (SNI extraction)
- *   - Checks blocking rules
- *   - Forwards non-blocked packets to the output queue
+ * - Pops packets from its input queue
+ * - Looks up flow in local flow table
+ * - Classifies traffic (SNI extraction)
+ * - Checks blocking rules
+ * - Forwards non-blocked packets to the output queue
  */
 public class FastPath implements Runnable {
     private static final Logger logger = LoggerFactory.getLogger(FastPath.class);
@@ -47,11 +46,11 @@ public class FastPath implements Runnable {
     private final AtomicLong forwardedCount = new AtomicLong(0);
 
     public FastPath(int id,
-                    BlockingQueue<PacketInfo> inputQueue,
-                    BlockingQueue<PacketInfo> outputQueue,
-                    PacketProcessor packetProcessor,
-                    RuleManager ruleManager,
-                    AtomicBoolean running) {
+            BlockingQueue<PacketInfo> inputQueue,
+            BlockingQueue<PacketInfo> outputQueue,
+            PacketProcessor packetProcessor,
+            RuleManager ruleManager,
+            AtomicBoolean running) {
         this.id = id;
         this.inputQueue = inputQueue;
         this.outputQueue = outputQueue;
@@ -67,7 +66,8 @@ public class FastPath implements Runnable {
         while (running.get() || !inputQueue.isEmpty()) {
             try {
                 PacketInfo packet = inputQueue.poll(100, java.util.concurrent.TimeUnit.MILLISECONDS);
-                if (packet == null) continue;
+                if (packet == null)
+                    continue;
 
                 processPacket(packet);
 
@@ -100,8 +100,7 @@ public class FastPath implements Runnable {
             FiveTuple tuple = new FiveTuple(
                     packet.getSrcIp(), packet.getDstIp(),
                     packet.getSrcPort(), packet.getDstPort(),
-                    packet.getProtocol()
-            );
+                    packet.getProtocol());
             packet.setFiveTuple(tuple);
 
             FiveTuple normalized = tuple.normalized();
@@ -154,10 +153,27 @@ public class FastPath implements Runnable {
     }
 
     // ---- Accessors ----
-    public int getId() { return id; }
-    public BlockingQueue<PacketInfo> getInputQueue() { return inputQueue; }
-    public long getProcessedCount() { return processedCount.get(); }
-    public long getDroppedCount() { return droppedCount.get(); }
-    public long getForwardedCount() { return forwardedCount.get(); }
-    public Map<FiveTuple, Connection> getFlows() { return flows; }
+    public int getId() {
+        return id;
+    }
+
+    public BlockingQueue<PacketInfo> getInputQueue() {
+        return inputQueue;
+    }
+
+    public long getProcessedCount() {
+        return processedCount.get();
+    }
+
+    public long getDroppedCount() {
+        return droppedCount.get();
+    }
+
+    public long getForwardedCount() {
+        return forwardedCount.get();
+    }
+
+    public Map<FiveTuple, Connection> getFlows() {
+        return flows;
+    }
 }
