@@ -492,46 +492,87 @@ java -jar target/packet-analyzer-1.0-SNAPSHOT.jar input.pcap output.pcap --lbs 4
 # Creates 4 LB threads × 4 FP threads = 16 processing threads
 ```
 
----
+### What Each Section Means
 
-## 📚 Dependencies
-
-| Dependency | Version | Purpose |
-|---|---|---|
-| [pcap4j-core](https://github.com/kaitoy/pcap4j) | 1.8.2 | PCAP file reading and packet capture |
-| [pcap4j-packetfactory-static](https://github.com/kaitoy/pcap4j) | 1.8.2 | Static packet factory for pcap4j |
-| [slf4j-simple](https://www.slf4j.org/) | 2.0.9 | Simple logging facade implementation |
-
-All dependencies are managed via Maven and downloaded automatically during build.
-
----
-
-## 🔮 Future Enhancements
-
-- [ ] **Live Packet Sniffing** — Real-time capture from network interfaces
-- [ ] **Real-Time Traffic Dashboard** — Web-based UI for live monitoring
-- [ ] **Threat Detection** — Signature-based intrusion detection
-- [ ] **HTTP/3 & QUIC Support** — Parse UDP-based QUIC protocol
-- [ ] **Geo-IP Lookup** — Map IP addresses to geographic locations
-- [ ] **Intrusion Detection System** — Pattern matching against known attack signatures
-- [ ] **IPv6 Support** — Parse IPv6 headers and extension headers
-- [ ] **JSON/CSV Report Export** — Machine-readable report formats
-- [ ] **LB/FP Thread Architecture** — Load Balancer + Fast Path consistent-hashing threads (like C++ version)
-- [ ] **Per-Thread Statistics** — Thread-level processing metrics in report output
-- [x] **Multi-threaded Processing** — Parallel packet processing for large captures
-- [x] **PCAP Output** — Write filtered (forwarded) packets to output PCAP files
-- [x] **HTTP Host Extraction** — Domain detection for plain HTTP traffic
-- [x] **App-Type Blocking** — Block traffic by application type (--block-app)
-- [x] **Flow-Level Blocking** — Once a flow is blocked, all subsequent packets are dropped
-- [x] **CLI Arguments** — Command-line flags for blocking rules
+| Section | Meaning |
+|---------|---------|
+| Configuration | Number of threads created |
+| Rules | Which blocking rules are active |
+| Total Packets | Packets read from input file |
+| Forwarded | Packets written to output file |
+| Dropped | Packets blocked (not written) |
+| Thread Statistics | Work distribution across threads |
+| Application Breakdown | Traffic classification results |
+| Detected SNIs | Actual domain names found |
 
 ---
 
-## 📄 License
+## 12. Extending the Project
 
-This project is open source and available under the [MIT License](LICENSE).
+### Ideas for Improvement
+
+1. **Add More App Signatures**
+   ```java
+   // In AppType.java
+   if (sni.contains("twitch")) {
+       return AppType.TWITCH;
+   }
+   ```
+
+2. **Add Bandwidth Throttling**
+   ```java
+   // Instead of DROP, delay packets
+   if (shouldThrottle(flow)) {
+       try {
+           Thread.sleep(10);
+       } catch (InterruptedException e) {
+           Thread.currentThread().interrupt();
+       }
+   }
+   ```
+
+3. **Add Live Statistics Dashboard**
+   ```java
+   // Separate thread printing stats every second
+   Thread statsThread = new Thread(() -> {
+       while (running.get()) {
+           printStats();
+           try {
+               Thread.sleep(1000);
+           } catch (InterruptedException e) {
+               Thread.currentThread().interrupt();
+           }
+       }
+   });
+   statsThread.start();
+   ```
+
+4. **Add QUIC/HTTP3 Support**
+   - QUIC uses UDP on port 443
+   - SNI is in the Initial packet (encrypted differently)
+
+5. **Add Persistent Rules**
+   - Save rules to a file (JSON or plain text)
+   - Load them automatically on startup
 
 ---
 
-> **Note:** This Java implementation is inspired by DPI Engine architecture principles for educational and research purposes.
+## Summary
 
+This Java DPI engine demonstrates:
+
+1. **Network Protocol Parsing** - Decoding binary data (`byte[]`) natively in Java
+2. **Deep Packet Inspection** - Extracting SNI from TLS Client Hello
+3. **Flow Tracking** - Managing stateful connections using `HashMap` and `equals/hashCode`
+4. **Multi-threaded Architecture** - Scaling with `BlockingQueue` and worker threads
+5. **Producer-Consumer Pattern** - Thread-safe communication between stages
+
+The key insight is that even HTTPS traffic leaks the destination domain in the TLS handshake, allowing network operators to identify and control application usage.
+
+---
+
+## Questions?
+
+If you have questions about any part of this project, the code is well-commented and follows the same flow described in this document. Start with `Main.java` to understand the entry point, then move to `DPIEngine.java` to see how parallelism is added and flows are managed.
+
+Happy learning! 🚀
