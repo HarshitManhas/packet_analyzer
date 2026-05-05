@@ -14,7 +14,6 @@ import org.slf4j.LoggerFactory;
 import java.io.IOException;
 import java.time.Instant;
 import java.util.ArrayList;
-import java.util.Collection;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.BlockingQueue;
@@ -349,13 +348,6 @@ public class DPIEngine {
      * Collects statistics from all Fast Path threads into the central StatsCollector.
      */
     private void collectStatsFromFPs() {
-        for (FastPath fp : fastPaths) {
-            for (Connection conn : fp.getFlows().values()) {
-                // The FP already counted processed/dropped/forwarded
-                // We need to record each flow's packets in the central stats
-            }
-        }
-
         // Walk all FP flow tables to aggregate stats
         for (FastPath fp : fastPaths) {
             for (Map.Entry<FiveTuple, Connection> entry : fp.getFlows().entrySet()) {

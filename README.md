@@ -1,73 +1,278 @@
-# 🔍 Packet Analyzer — Java DPI Engine
+# DPI Engine - Deep Packet Inspection System (Java Edition)
 
-A high-performance, Java-based **Packet Analyzer** that reads PCAP capture files, parses multi-layer network protocols, performs **Deep Packet Inspection (DPI)**, extracts TLS Server Name Indication (SNI), tracks network flows, classifies applications, applies filtering rules, and generates comprehensive traffic reports.
-
----
-
-## 📋 Table of Contents
-
-- [Features](#-features)
-- [Architecture](#-architecture)
-- [Project Structure](#-project-structure)
-- [Prerequisites](#-prerequisites)
-- [Installation](#-installation)
-- [Usage](#-usage)
-- [Packet Processing Pipeline](#-packet-processing-pipeline)
-- [Module Details](#-module-details)
-  - [Model Layer](#model-layer)
-  - [Parser Layer](#parser-layer)
-  - [Engine Layer](#engine-layer)
-  - [Utility Layer](#utility-layer)
-  - [Report Layer](#report-layer)
-- [Five-Tuple Flow Tracking](#-five-tuple-flow-tracking)
-- [Deep Packet Inspection](#-deep-packet-inspection)
-- [Rule-Based Filtering](#-rule-based-filtering)
-- [Sample Output](#-sample-output)
-- [Dependencies](#-dependencies)
-- [Future Enhancements](#-future-enhancements)
-- [License](#-license)
+This document explains **everything** about this project - from basic networking concepts to the complete code architecture. After reading this, you should understand exactly how packets flow through the system without needing to read the code.
 
 ---
 
-## ✨ Features
+## Table of Contents
 
-| Feature | Description |
-|---|---|
-| **PCAP Parsing** | Read and parse standard PCAP capture files using pcap4j |
-| **Multi-Layer Protocol Parsing** | Parse Ethernet II, IPv4, TCP, and UDP headers from raw bytes |
-| **Deep Packet Inspection** | Inspect packet payloads beyond header-level information |
-| **TLS SNI Extraction** | Extract Server Name Indication from TLS ClientHello handshakes |
-| **HTTP Host Extraction** | Extract domain from HTTP/1.x `Host:` header for plain HTTP traffic |
-| **Application Classification** | Detect applications (YouTube, Google, GitHub, Netflix, etc.) via domain signatures and port heuristics |
-| **Five-Tuple Flow Tracking** | Group packets into bidirectional flows using normalized five-tuples |
-| **TCP Connection Tracking** | Track TCP connection state machines (NEW → ESTABLISHED → CLOSING → CLOSED → RESET) |
-| **Rule-Based Filtering** | Block traffic by IP, domain, port, application type, or custom predicates |
-| **Flow-Level Blocking** | Once a flow is identified as blocked, all subsequent packets in that flow are automatically dropped |
-| **Filtered PCAP Output** | Write non-blocked (forwarded) packets to an output PCAP file |
-| **CLI Arguments** | Command-line flags for `--block-app`, `--block-ip`, `--block-domain`, `--block-port` |
-| **Statistics & Reporting** | Generate detailed traffic analysis reports with protocol distributions, domain lists, and connection summaries |
-| **Multi-threaded Processing** | LB/FP thread architecture with consistent hashing, per-FP flow tables, and output writer thread |
+1. [What is DPI?](#1-what-is-dpi)
+2. [Networking Background](#2-networking-background)
+3. [Project Overview](#3-project-overview)
+4. [File Structure](#4-file-structure)
+5. [The Journey of a Packet](#5-the-journey-of-a-packet)
+6. [Multi-threaded Architecture](#6-multi-threaded-architecture)
+7. [Deep Dive: Each Component](#7-deep-dive-each-component)
+8. [How SNI Extraction Works](#8-how-sni-extraction-works)
+9. [How Blocking Works](#9-how-blocking-works)
+10. [Building and Running](#10-building-and-running)
+11. [Understanding the Output](#11-understanding-the-output)
 
 ---
 
-## 🏗 Architecture
+## 1. What is DPI?
+
+**Deep Packet Inspection (DPI)** is a technology used to examine the contents of network packets as they pass through a checkpoint. Unlike simple firewalls that only look at packet headers (source/destination IP), DPI looks *inside* the packet payload.
+
+### Real-World Uses:
+- **ISPs**: Throttle or block certain applications (e.g., BitTorrent)
+- **Enterprises**: Block social media on office networks
+- **Parental Controls**: Block inappropriate websites
+- **Security**: Detect malware or intrusion attempts
+
+### What Our DPI Engine Does:
+```
+User Traffic (PCAP) → [DPI Engine] → Filtered Traffic (PCAP)
+                           ↓
+                    - Identifies apps (YouTube, Facebook, etc.)
+                    - Blocks based on rules
+                    - Generates reports
+```
+
+---
+
+## 2. Networking Background
+
+### The Network Stack (Layers)
+
+When you visit a website, data travels through multiple "layers":
+
+```
+┌─────────────────────────────────────────────────────────┐
+│ Layer 7: Application    │ HTTP, TLS, DNS               │
+├─────────────────────────────────────────────────────────┤
+│ Layer 4: Transport      │ TCP (reliable), UDP (fast)   │
+├─────────────────────────────────────────────────────────┤
+│ Layer 3: Network        │ IP addresses (routing)       │
+├─────────────────────────────────────────────────────────┤
+│ Layer 2: Data Link      │ MAC addresses (local network)│
+└─────────────────────────────────────────────────────────┘
+```
+
+### A Packet's Structure
+
+Every network packet is like a **Russian nesting doll** - headers wrapped inside headers:
+
+```
+┌──────────────────────────────────────────────────────────────────┐
+│ Ethernet Header (14 bytes)                                       │
+│ ┌──────────────────────────────────────────────────────────────┐ │
+│ │ IP Header (20+ bytes)                                        │ │
+│ │ ┌──────────────────────────────────────────────────────────┐ │ │
+│ │ │ TCP Header (20+ bytes)                                   │ │ │
+│ │ │ ┌──────────────────────────────────────────────────────┐ │ │ │
+│ │ │ │ Payload (Application Data)                           │ │ │ │
+│ │ │ │ e.g., TLS Client Hello with SNI                      │ │ │ │
+│ │ │ └──────────────────────────────────────────────────────┘ │ │ │
+│ │ └──────────────────────────────────────────────────────────┘ │ │
+│ └──────────────────────────────────────────────────────────────┘ │
+└──────────────────────────────────────────────────────────────────┘
+```
+
+### The Five-Tuple
+
+A **connection** (or "flow") is uniquely identified by 5 values:
+
+| Field | Example | Purpose |
+|-------|---------|---------|
+| Source IP | 192.168.1.100 | Who is sending |
+| Destination IP | 172.217.14.206 | Where it's going |
+| Source Port | 54321 | Sender's application identifier |
+| Destination Port | 443 | Service being accessed (443 = HTTPS) |
+| Protocol | TCP (6) | TCP or UDP |
+
+**Why is this important?** 
+- All packets with the same 5-tuple belong to the same connection
+- If we block one packet of a connection, we should block all of them
+- This is how we "track" conversations between computers
+
+### What is SNI?
+
+**Server Name Indication (SNI)** is part of the TLS/HTTPS handshake. When you visit `https://www.youtube.com`:
+
+1. Your browser sends a "Client Hello" message
+2. This message includes the domain name in **plaintext** (not encrypted yet!)
+3. The server uses this to know which certificate to send
+
+```
+TLS Client Hello:
+├── Version: TLS 1.2
+├── Random: [32 bytes]
+├── Cipher Suites: [list]
+└── Extensions:
+    └── SNI Extension:
+        └── Server Name: "www.youtube.com"  ← We extract THIS!
+```
+
+**This is the key to DPI**: Even though HTTPS is encrypted, the domain name is visible in the first packet!
+
+---
+
+## 3. Project Overview
+
+### What This Project Does
+
+```
+┌─────────────┐     ┌─────────────┐     ┌─────────────┐
+│ Wireshark   │     │ DPI Engine  │     │ Output      │
+│ Capture     │ ──► │ (Java)      │ ──► │ PCAP        │
+│ (input.pcap)│     │ - Parse     │     │ (filtered)  │
+└─────────────┘     │ - Classify  │     └─────────────┘
+                    │ - Block     │
+                    │ - Report    │
+                    └─────────────┘
+```
+
+The system is built entirely in **Java** and uses a multi-threaded architecture to ensure high-performance processing, modeled after high-speed network appliances.
+
+---
+
+## 4. File Structure
+
+```
+packet_analyzer/
+├── src/main/java/com/packetanalyzer/
+│   ├── Main.java                 # Entry point & CLI parsing
+│   ├── engine/                   # Core Processing Architecture
+│   │   ├── DPIEngine.java        # Main orchestrator
+│   │   ├── LoadBalancer.java     # LB thread implementation
+│   │   ├── FastPath.java         # Worker thread implementation
+│   │   ├── PacketProcessor.java  # Coordination of parsing
+│   │   ├── RuleManager.java      # Blocking rules
+│   │   ├── FlowManager.java      # Flow tracking management
+│   │   └── ConnectionTracker.java# Individual connection state
+│   │
+│   ├── model/                    # Data structures
+│   │   ├── Connection.java       # Flow state data
+│   │   ├── FiveTuple.java        # Unique flow identifier
+│   │   ├── PacketInfo.java       # Packet metadata
+│   │   ├── AppType.java          # Enums for detected apps
+│   │   └── DPIStats.java         # Statistics record
+│   │
+│   ├── parser/                   # Protocol parsing
+│   │   ├── PcapReader.java       # PCAP file reading
+│   │   ├── PcapWriter.java       # PCAP file writing
+│   │   ├── TLSParser.java        # SNI extraction
+│   │   ├── HTTPParser.java       # Host header extraction
+│   │   └── Ethernet/IP/TCP/UDPParser.java # Headers
+│   │
+│   ├── report/                   # Output Generation
+│   └── utils/                    # Helper functions
+│
+├── pom.xml                       # Maven build configuration
+└── README.md                     # This file!
+```
+
+---
+
+## 5. The Journey of a Packet
+
+Let's trace a single packet through the system:
+
+### Step 1: Read PCAP File
+
+```java
+PcapReader reader = new PcapReader();
+reader.read(filePath, packet -> {
+    // Process raw packet
+});
+```
+
+**What happens:**
+1. Open the file in binary mode
+2. Read the 24-byte global header
+3. Read the 16-byte packet header and variable-length data
+
+### Step 2: Pre-Parse and Route
+
+```java
+preParseForRouting(packet);
+int lbIndex = selectLoadBalancer(packet);
+loadBalancers.get(lbIndex).getInputQueue().put(packet);
+```
+
+**What happens:**
+1. Quickly extract IP and Port to create a basic 5-tuple
+2. Hash the 5-tuple to determine which Load Balancer (LB) thread gets the packet
+3. Send to LB queue
+
+### Step 3: Fast Path Processing
+
+```java
+// Inside FastPath.java
+PacketInfo parsed = packetProcessor.parse(rawPacket);
+Connection flow = flowManager.getOrCreateFlow(parsed.getFiveTuple());
+```
+
+**What happens:**
+1. The packet reaches a `FastPath` thread
+2. `PacketProcessor` calls `EthernetParser`, `IPParser`, `TCPParser`, etc.
+3. Retrieves the active `Connection` (Flow) from a local HashMap.
+
+### Step 4: Extract SNI / Deep Packet Inspection
+
+```java
+// Inside TLSParser.java
+if (isTlsClientHello(payload)) {
+    String sni = extractSNI(payload);
+    if (sni != null) {
+        flow.setDetectedDomain(sni);
+        flow.setAppType(AppType.fromDomain(sni));
+    }
+}
+```
+
+### Step 5: Check Blocking Rules
+
+```java
+if (ruleManager.isBlocked(parsed)) {
+    flow.setBlocked(true);
+}
+```
+
+### Step 6: Forward or Drop
+
+```java
+if (flow.isBlocked()) {
+    stats.incrementDropped();
+} else {
+    stats.incrementForwarded();
+    outputQueue.put(parsed);
+}
+```
+
+---
+
+## 6. Multi-threaded Architecture
+
+The `DPIEngine` uses a **parallel** design for high performance:
 
 ```
                     ┌─────────────────┐
-                    │  Reader Thread   │
-                    │  (reads PCAP)    │
+                    │  Reader Thread  │
+                    │  (reads PCAP)   │
                     └────────┬────────┘
                              │
               ┌──────────────┴──────────────┐
               │      hash(5-tuple) % N      │
               ▼                             ▼
     ┌─────────────────┐           ┌─────────────────┐
-    │  LB0 Thread      │           │  LB1 Thread      │
-    │  (Load Balancer) │           │  (Load Balancer) │
+    │  LB0 Thread     │           │  LB1 Thread     │
+    │  (Load Balancer)│           │  (Load Balancer)│
     └────────┬────────┘           └────────┬────────┘
              │                             │
       ┌──────┴──────┐               ┌──────┴──────┐
-      │ hash % M    │               │ hash % M    │
+      │hash % M     │               │hash % M     │
       ▼             ▼               ▼             ▼
 ┌──────────┐ ┌──────────┐   ┌──────────┐ ┌──────────┐
 │FP0 Thread│ │FP1 Thread│   │FP2 Thread│ │FP3 Thread│
@@ -88,404 +293,152 @@ A high-performance, Java-based **Packet Analyzer** that reads PCAP capture files
               └───────────────────────┘
 ```
 
-**Why this design:**
-- **Load Balancers (LBs):** Distribute work across Fast Paths
-- **Fast Paths (FPs):** Do the actual DPI processing with per-FP flow tables
-- **Consistent Hashing:** Same 5-tuple always goes to the same FP (no lock contention)
-- **Output Writer:** Collects forwarded packets from all FPs and writes to output PCAP
+### Why This Design?
+
+1. **Load Balancers (LBs):** Distribute work across FPs
+2. **Fast Paths (FPs):** Do the actual DPI processing
+3. **Consistent Hashing:** Same 5-tuple always goes to same FP
+
+**Why consistent hashing matters:**
+```
+Connection: 192.168.1.100:54321 → 142.250.185.206:443
+
+Packet 1 (SYN):         hash → FP2
+Packet 2 (SYN-ACK):     hash → FP2  (same FP!)
+Packet 3 (Client Hello): hash → FP2  (same FP!)
+Packet 4 (Data):        hash → FP2  (same FP!)
+
+All packets of this connection go to FP2.
+FP2 can track the flow state correctly without needing complex thread locks on the flow table.
+```
+
+The system heavily utilizes Java's `java.util.concurrent.BlockingQueue` (specifically `LinkedBlockingQueue`) for thread-safe communication between stages.
 
 ---
 
-## 📁 Project Structure
+## 7. Deep Dive: Each Component
 
-```
-packet_analyzer/
-│
-├── src/main/java/com/packetanalyzer/
-│   ├── Main.java                          # Application entry point
-│   │
-│   ├── engine/                            # Core processing engine
-│   │   ├── DPIEngine.java                 # Main pipeline orchestrator (LB/FP architecture)
-│   │   ├── LoadBalancer.java              # Load Balancer thread (distributes to FPs)
-│   │   ├── FastPath.java                  # Fast Path thread (DPI processing + per-FP flow table)
-│   │   ├── PacketProcessor.java           # Protocol parsing pipeline
-│   │   ├── RuleManager.java              # Filtering & blocking rules
-│   │   ├── ConnectionTracker.java         # TCP connection state tracking
-│   │   └── FlowManager.java              # Five-tuple flow management
-│   │
-│   ├── model/                             # Data models
-│   │   ├── PacketInfo.java                # Packet data container
-│   │   ├── FiveTuple.java                 # Flow identifier (5-tuple)
-│   │   ├── Connection.java                # Connection aggregate
-│   │   ├── AppType.java                   # Application type enum
-│   │   └── DPIStats.java                  # Statistics accumulator
-│   │
-│   ├── parser/                            # Protocol parsers
-│   │   ├── PcapReader.java                # PCAP file reader (pcap4j)
-│   │   ├── PcapWriter.java                # PCAP output file writer
-│   │   ├── EthernetParser.java            # Ethernet II frame parser
-│   │   ├── IPParser.java                  # IPv4 header parser
-│   │   ├── TCPParser.java                 # TCP segment parser
-│   │   ├── UDPParser.java                 # UDP datagram parser
-│   │   ├── TLSParser.java                # TLS ClientHello SNI extractor
-│   │   └── HTTPParser.java               # HTTP Host header extractor
-│   │
-│   ├── utils/                             # Utility classes
-│   │   ├── ByteUtils.java                 # Byte manipulation helpers
-│   │   ├── IPUtils.java                   # IP address utilities
-│   │   └── PacketUtils.java               # Packet-level utilities
-│   │
-│   └── report/                            # Reporting
-│       ├── ReportGenerator.java           # Formatted report output
-│       └── StatsCollector.java            # Statistics collection
-│
-├── input/                                 # Place PCAP files here
-│   └── sample.pcap
-│
-├── output/                                # Filtered output files
-│   └── filtered_output.pcap
-│
-├── pom.xml                                # Maven build configuration
-├── CLAUDE.md                              # Project specification
-├── README.md                              # This file
-└── .gitignore                             # Git ignore rules
-```
+### PcapReader.java
 
----
+**Purpose:** Read network captures saved by Wireshark in Java using `DataInputStream`.
 
-## 📦 Prerequisites
+**Important concepts:** PCAP data is typically little-endian. Java natively reads binary data as big-endian. The reader uses utilities like `Integer.reverseBytes()` to correctly parse PCAP headers.
 
-- **Java JDK 17+** (tested with OpenJDK 21)
-- **Apache Maven 3.6+**
-- **libpcap** (required by pcap4j for PCAP file reading)
+### Protocol Parsers (TCPParser, IPParser, etc.)
 
-### Installing libpcap
-
-```bash
-# Ubuntu / Debian
-sudo apt-get install libpcap-dev
-
-# CentOS / RHEL
-sudo yum install libpcap-devel
-
-# macOS
-brew install libpcap
-```
-
----
-
-## 🚀 Installation
-
-### 1. Clone the Repository
-
-```bash
-git clone https://github.com/your-username/packet-analyzer.git
-cd packet-analyzer
-```
-
-### 2. Build the Project
-
-```bash
-mvn clean install
-```
-
-### 3. Verify the Build
-
-```bash
-mvn compile
-```
-
-You should see:
-```
-[INFO] Compiling 22 source files to .../target/classes
-[INFO] BUILD SUCCESS
-```
-
----
-
-## 💻 Usage
-
-### Basic Usage
-
-Place a PCAP file in the `input/` directory and run:
-
-```bash
-mvn exec:java -Dexec.mainClass="com.packetanalyzer.Main"
-```
-
-This reads from the default path `input/sample.pcap`.
-
-### Custom PCAP File
-
-```bash
-mvn exec:java -Dexec.mainClass="com.packetanalyzer.Main" -Dexec.args="/path/to/capture.pcap"
-```
-
-### With Filtering (Output PCAP + Blocking Rules)
-
-Matches the C++ CLI interface:
-
-```bash
-# Process and write non-blocked packets to output
-java -jar target/packet-analyzer-1.0-SNAPSHOT.jar input/sample.pcap output/filtered.pcap
-
-# Block YouTube and Facebook traffic
-java -jar target/packet-analyzer-1.0-SNAPSHOT.jar input/sample.pcap output/filtered.pcap \
-    --block-app YouTube \
-    --block-app Facebook
-
-# Block by IP, domain, and port
-java -jar target/packet-analyzer-1.0-SNAPSHOT.jar input/sample.pcap output/filtered.pcap \
-    --block-ip 192.168.1.50 \
-    --block-domain tiktok \
-    --block-port 8080
-```
-
-### CLI Options
-
-| Flag | Description | Example |
-|---|---|---|
-| `--block-app <name>` | Block by application type | `--block-app YouTube` |
-| `--block-ip <ip>` | Block by IP address | `--block-ip 192.168.1.50` |
-| `--block-domain <name>` | Block by domain (substring) | `--block-domain facebook` |
-| `--block-port <port>` | Block by port number | `--block-port 8080` |
-| `--help`, `-h` | Show help message | `--help` |
-
-### Building a JAR
-
-```bash
-mvn clean package
-java -jar target/packet-analyzer-1.0-SNAPSHOT.jar input/sample.pcap
-```
-
-### Generating a PCAP for Testing
-
-If you don't have a PCAP file, you can capture one with `tcpdump`:
-
-```bash
-# Capture 100 packets on the default interface
-sudo tcpdump -c 100 -w input/sample.pcap
-
-# Capture only TCP traffic on port 443 (HTTPS/TLS)
-sudo tcpdump -c 200 -w input/sample.pcap tcp port 443
-```
-
----
-
-## 🔄 Packet Processing Pipeline
-
-Each packet flows through these stages sequentially:
-
-```
-  ┌──────────────┐
-  │  PCAP File   │
-  └──────┬───────┘
-         ▼
-  ┌──────────────┐
-  │ PcapReader   │  Read raw bytes + timestamp via pcap4j
-  └──────┬───────┘
-         ▼
-  ┌──────────────┐
-  │  Ethernet    │  Parse Dst/Src MAC, EtherType, VLAN tags
-  │  Parser      │
-  └──────┬───────┘
-         ▼
-  ┌──────────────┐
-  │  IP Parser   │  Parse IPv4: Src/Dst IP, Protocol, TTL, IHL
-  └──────┬───────┘
-         ▼
-  ┌──────────────┐
-  │ TCP / UDP    │  Parse ports, flags (SYN/ACK/FIN/RST),
-  │ Parser       │  sequence numbers, payload extraction
-  └──────┬───────┘
-         ▼
-  ┌──────────────┐
-  │ TLS Parser   │  Extract SNI from ClientHello (port 443)
-  └──────┬───────┘
-         ▼
-  ┌──────────────┐
-  │ App Classify │  Domain-based → Port-based fallback
-  └──────┬───────┘
-         ▼
-  ┌──────────────┐
-  │ Flow Tracker │  Group into bidirectional flows (5-tuple)
-  └──────┬───────┘
-         ▼
-  ┌──────────────┐
-  │ Connection   │  Track TCP state (SYN→EST→FIN→CLOSED)
-  │ Tracker      │
-  └──────┬───────┘
-         ▼
-  ┌──────────────┐
-  │ Rule Manager │  Evaluate IP/domain/port block rules
-  └──────┬───────┘
-         ▼
-  ┌──────────────┐
-  │ Stats &      │  Accumulate metrics, print report
-  │ Report       │
-  └──────────────┘
-```
-
----
-
-## 📦 Module Details
-
-### Model Layer
-
-| Class | Description |
-|---|---|
-| **`PacketInfo`** | Central data container populated layer-by-layer as the packet passes through each parser. Holds Ethernet, IP, TCP/UDP fields, payload, DPI results, flow association, and blocking state. |
-| **`FiveTuple`** | Immutable flow identifier: `(srcIp, dstIp, srcPort, dstPort, protocol)`. Supports `normalized()` to ensure both directions of a connection map to the same key. |
-| **`Connection`** | Aggregates all packets in a flow. Tracks state (NEW/ESTABLISHED/CLOSING/CLOSED/RESET), forward/backward byte counts, detected domains, and application type. |
-| **`AppType`** | Enum of 20 application categories (HTTP, HTTPS, DNS, TLS, SSH, YouTube, Google, GitHub, Netflix, etc.) with human-readable names and descriptions. |
-| **`DPIStats`** | Thread-safe statistics accumulator using `AtomicInteger`/`AtomicLong`. Tracks packet counts, protocol distribution, application classification, and domain frequencies. |
-
-### Parser Layer
-
-| Class | Description |
-|---|---|
-| **`PcapReader`** | Reads PCAP files via pcap4j. Supports both batch mode (`readAll()`) and streaming mode (`read(path, consumer)`) for memory efficiency. |
-| **`PcapWriter`** | Writes filtered (forwarded) packets to an output PCAP file with proper global and per-packet headers. Thread-safe via `synchronized`. |
-| **`EthernetParser`** | Parses 14-byte Ethernet II frames: destination MAC, source MAC, EtherType. Handles 802.1Q VLAN tagging transparently. |
-| **`IPParser`** | Parses 20-60 byte IPv4 headers: version, IHL, total length, TTL, protocol number, source/destination IP addresses. |
-| **`TCPParser`** | Parses 20-60 byte TCP headers: ports, sequence/ack numbers, data offset, flags (SYN/ACK/FIN/RST/PSH), window size. Extracts payload bytes. |
-| **`UDPParser`** | Parses 8-byte UDP headers: ports, length. Extracts payload with truncated-packet handling. |
-| **`TLSParser`** | Identifies TLS handshake records (content type `0x16`), extracts TLS version, and walks through ClientHello extensions to find the SNI hostname (extension type `0x0000`). |
-| **`HTTPParser`** | Parses HTTP/1.x request headers to extract the `Host:` header value for plain HTTP domain detection (port 80). Matches C++ `HTTPHostExtractor`. |
-
-### Engine Layer
-
-| Class | Description |
-|---|---|
-| **`DPIEngine`** | Top-level orchestrator matching C++ `dpi_mt.cpp`. Drives: read → parse → classify → track → block → forward/drop → report. Supports PCAP output and flow-level blocking. |
-| **`PacketProcessor`** | Runs a single packet through Ethernet → IP → TCP/UDP → TLS/HTTP → Application classification. Matches C++ `packet_parser.cpp` + `sni_extractor.cpp`. |
-| **`FlowManager`** | Groups packets into bidirectional flows using normalized five-tuples. Uses `ConcurrentHashMap` for thread safety. |
-| **`ConnectionTracker`** | Maintains per-flow TCP state machines. Tracks active vs. total connections. |
-| **`RuleManager`** | Evaluates blocking rules: IP blocklist, **app blocklist**, domain blocklist (substring match), port blocklist, and custom `Predicate<PacketInfo>` rules. Matches C++ `rule_manager.h`. |
-
-### Utility Layer
-
-| Class | Description |
-|---|---|
-| **`ByteUtils`** | Low-level byte manipulation: `readUint8/16/32` (big-endian), `extractBytes`, `toHexString`, `toMacAddress`, `toAsciiString`, bounds checking. |
-| **`IPUtils`** | IP address utilities: byte↔string conversion, validation, private/broadcast/multicast detection, protocol number→name mapping. |
-| **`PacketUtils`** | Port-based application classification, port range checks (well-known/registered/ephemeral), byte formatting, EtherType naming, TCP flag formatting. |
-
-### Report Layer
-
-| Class | Description |
-|---|---|
-| **`StatsCollector`** | Thin wrapper that delegates packet recording to `DPIStats`. |
-| **`ReportGenerator`** | Generates formatted console reports with sections: Packet Summary, Filtering Summary, Application Classification, Detected Domains, Flow Summary, Connection Summary, and Top Connections. |
-
----
-
-## 🔗 Five-Tuple Flow Tracking
-
-Each network connection is uniquely identified by a **five-tuple**:
-
-| Field | Description | Example |
-|---|---|---|
-| Source IP | Sender's IP address | `192.168.1.100` |
-| Destination IP | Receiver's IP address | `142.250.190.46` |
-| Source Port | Sender's port number | `52481` |
-| Destination Port | Receiver's port number | `443` |
-| Protocol | Transport protocol number | `6` (TCP) |
-
-### Bidirectional Normalization
-
-The `FiveTuple.normalized()` method ensures both directions of a conversation map to the same flow key:
-
-```
-Client → Server:  192.168.1.100:52481 → 142.250.190.46:443 [TCP]
-Server → Client:  142.250.190.46:443 → 192.168.1.100:52481 [TCP]
-                  ↓ normalized() ↓
-Both map to:      142.250.190.46:443 → 192.168.1.100:52481 [TCP]
-```
-
----
-
-## 🔬 Deep Packet Inspection
-
-### TLS SNI Extraction
-
-The analyzer inspects TLS ClientHello messages to extract the **Server Name Indication (SNI)** — the hostname the client is connecting to. This works even though the traffic is encrypted.
-
-**How it works:**
-1. Detect TLS handshake record (content type `0x16`)
-2. Identify ClientHello message (handshake type `0x01`)
-3. Skip session ID, cipher suites, and compression methods
-4. Walk through TLS extensions
-5. Extract hostname from SNI extension (type `0x0000`)
-
-### Application Classification
-
-Traffic is classified using a two-tier approach:
-
-**Tier 1 — Domain-based** (highest priority):
-| Domain Pattern | Classification |
-|---|---|
-| `youtube.com`, `googlevideo.com` | YouTube |
-| `google.com` | Google |
-| `github.com` | GitHub |
-| `facebook.com`, `fbcdn.net` | Facebook |
-| `twitter.com`, `twimg.com` | Twitter |
-| `netflix.com`, `nflx.net` | Netflix |
-| `amazon.com`, `aws` | Amazon |
-| `microsoft.com`, `azure`, `msn` | Microsoft |
-
-**Tier 2 — Port-based** (fallback):
-| Port | Classification |
-|---|---|
-| 80 | HTTP |
-| 443 | HTTPS/TLS |
-| 53 | DNS |
-| 22 | SSH |
-| 21/20 | FTP |
-| 25/587 | SMTP |
-| 123 | NTP |
-
----
-
-## 🛡 Rule-Based Filtering
-
-The `RuleManager` supports multiple types of blocking rules, matching the C++ `rule_manager.h`:
+**Purpose:** Extract protocol fields from `byte[]` arrays.
 
 ```java
-DPIEngine engine = new DPIEngine();
-
-// Block by application type (matches C++ --block-app)
-engine.getRuleManager().blockApp("YouTube");
-engine.getRuleManager().blockApp(AppType.FACEBOOK);
-
-// Block by IP address (matches C++ --block-ip)
-engine.getRuleManager().blockIp("192.168.1.50");
-
-// Block by domain substring (matches C++ --block-domain)
-engine.getRuleManager().blockDomain("tiktok");
-
-// Block by port
-engine.getRuleManager().blockPort(8080);
-
-// Custom predicate rule
-engine.getRuleManager().addCustomRule(packet ->
-    packet.getPayloadLength() > 10000  // Block large payloads
-);
-
-// Set output file for forwarded (non-blocked) packets
-engine.setOutputPath("output/filtered.pcap");
-
-engine.processFile("input/sample.pcap");
+// Network Byte Order (Big-Endian) is standard for protocols
+// Extracting a 16-bit port in Java:
+int port = ((raw[offset] & 0xFF) << 8) | (raw[offset + 1] & 0xFF);
 ```
 
-### Flow-Level Blocking
+### TLSParser.java / HTTPParser.java
 
-Blocking operates at the **flow level**, matching the C++ behavior:
+**Purpose:** Extract domain names from application payloads.
+
+**For TLS (HTTPS):**
+- Verify TLS record header (0x16)
+- Verify Client Hello handshake (0x01)
+- Parse through Session ID, Cipher Suites
+- Find SNI Extension (Type 0x0000)
+
+**For HTTP:**
+- Convert payload to String
+- Search for `Host: ` header
+- Extract value until carriage return `\r`
+
+### Data Models (FiveTuple, Connection)
+
+**FiveTuple:**
+```java
+public class FiveTuple {
+    private String srcIp;
+    private String dstIp;
+    private int srcPort;
+    private int dstPort;
+    private int protocol;
+    
+    // override equals() and hashCode() for HashMap keys
+}
+```
+
+---
+
+## 8. How SNI Extraction Works
+
+When you visit `https://www.youtube.com`:
+
+```
+┌──────────┐                              ┌──────────┐
+│  Browser │                              │  Server  │
+└────┬─────┘                              └────┬─────┘
+     │                                         │
+     │ ──── Client Hello ─────────────────────►│
+     │      (includes SNI: www.youtube.com)    │
+     │                                         │
+     │ ◄─── Server Hello ───────────────────── │
+     │      (includes certificate)             │
+     │                                         │
+     │ ──── Key Exchange ─────────────────────►│
+     │                                         │
+     │ ◄═══ Encrypted Data ══════════════════► │
+     │      (from here on, everything is       │
+     │       encrypted - we can't see it)      │
+```
+
+**We can only extract SNI from the Client Hello!**
+
+### TLS Client Hello Structure
+
+```
+Byte 0:     Content Type = 0x16 (Handshake)
+Bytes 1-2:  Version = 0x0301 (TLS 1.0)
+Bytes 3-4:  Record Length
+
+-- Handshake Layer --
+Byte 5:     Handshake Type = 0x01 (Client Hello)
+...
+-- Extensions --
+Bytes X-X+1: Extensions Length
+For each extension:
+    Bytes: Extension Type (2)
+    Bytes: Extension Length (2)
+    Bytes: Extension Data
+
+-- SNI Extension (Type 0x0000) --
+Extension Type: 0x0000
+Extension Length: L
+  SNI List Length: M
+  SNI Type: 0x00 (hostname)
+  SNI Length: K
+  SNI Value: "www.youtube.com" ← THE GOAL!
+```
+
+Our `TLSParser` navigates this structure using byte offsets to safely extract the string without causing `IndexOutOfBoundsException`.
+
+---
+
+## 9. How Blocking Works
+
+### Rule Types
+
+| Rule Type | CLI Flag | Example | What it Blocks |
+|-----------|----------|---------|----------------|
+| IP | `--block-ip` | `192.168.1.50` | All traffic from/to this IP |
+| App | `--block-app` | `YouTube` | All connections classified as YouTube |
+| Domain | `--block-domain`| `tiktok` | Any SNI or Host containing "tiktok" |
+| Port | `--block-port`| `8080` | Traffic on this specific port |
+
+### Flow-Based Blocking
+
+**Important:** We block at the *flow* level, not packet level.
 
 ```
 Connection to YouTube:
   Packet 1 (SYN)           → No SNI yet, FORWARD
-  Packet 2 (SYN-ACK)       → No SNI yet, FORWARD
+  Packet 2 (SYN-ACK)       → No SNI yet, FORWARD  
   Packet 3 (ACK)           → No SNI yet, FORWARD
   Packet 4 (Client Hello)  → SNI: www.youtube.com
                            → App: YOUTUBE (blocked!)
@@ -496,62 +449,47 @@ Connection to YouTube:
   ...all subsequent packets → DROP
 ```
 
-Once a flow is identified and blocked, all subsequent packets of that flow are automatically dropped — even before re-evaluating individual rules.
+**Why this approach?**
+- We can't identify the app until we see the Client Hello
+- Once identified, we block all future packets of that flow
+- The connection will fail/timeout on the client
 
 ---
 
-## 📊 Sample Output
+## 10. Building and Running
 
+### Prerequisites
+
+- **Java 11 or higher**
+- **Maven** (optional, but typical for building)
+
+### Build Command
+
+```bash
+mvn clean package
 ```
-=======================================================
-          PACKET ANALYZER - DPI REPORT
-=======================================================
+*This generates a runnable JAR, typically `target/packet-analyzer-1.0-SNAPSHOT.jar`.*
 
---- Packet Summary ---
-  Total Packets:       150
-  TCP Packets:         110
-  UDP Packets:         40
-  Other Packets:       0
-  Malformed Packets:   0
-  Total Bytes:         125.40 KB
+### Running
 
---- Filtering Summary ---
-  Forwarded Packets:   138
-  Dropped Packets:     12
-  Blocked Packets:     12
-  TLS Packets:         45
+**Basic usage:**
+```bash
+java -jar target/packet-analyzer-1.0-SNAPSHOT.jar test_dpi.pcap output.pcap
+```
 
---- Application Classification ---
-  HTTPS               65 packets
-  YouTube              20 packets
-  Google               15 packets
-  DNS                  25 packets
-  GitHub               10 packets
-  HTTP                  8 packets
-  Unknown               7 packets
+**With blocking:**
+```bash
+java -jar target/packet-analyzer-1.0-SNAPSHOT.jar test_dpi.pcap output.pcap \
+    --block-app YouTube \
+    --block-app TikTok \
+    --block-ip 192.168.1.50 \
+    --block-domain facebook
+```
 
---- Detected Domains ---
-  - youtube.com                        (12 packets)
-  - www.google.com                     (10 packets)
-  - github.com                         (8 packets)
-  - fonts.googleapis.com               (5 packets)
-
---- Flow Summary ---
-  Total Flows:         23
-
---- Connection Summary ---
-  Total Connections:   18
-  Active Connections:  5
-
---- Top Connections (by packet count) ---
-  192.168.1.100:52481 -> 142.250.190.46:443 [TCP]
-    Packets: 25 | Bytes: 15.20 KB | State: ESTABLISHED | Domain: youtube.com | App: YouTube
-  192.168.1.100:48832 -> 140.82.121.4:443 [TCP]
-    Packets: 18 | Bytes: 8.50 KB | State: ESTABLISHED | Domain: github.com | App: GitHub
-
-=======================================================
-          END OF REPORT
-=======================================================
+**Configure threads:**
+```bash
+java -jar target/packet-analyzer-1.0-SNAPSHOT.jar input.pcap output.pcap --lbs 4 --fps 4
+# Creates 4 LB threads × 4 FP threads = 16 processing threads
 ```
 
 ---
@@ -586,4 +524,14 @@ All dependencies are managed via Maven and downloaded automatically during build
 - [x] **App-Type Blocking** — Block traffic by application type (--block-app)
 - [x] **Flow-Level Blocking** — Once a flow is blocked, all subsequent packets are dropped
 - [x] **CLI Arguments** — Command-line flags for blocking rules
+
+---
+
+## 📄 License
+
+This project is open source and available under the [MIT License](LICENSE).
+
+---
+
+> **Note:** This Java implementation is inspired by DPI Engine architecture principles for educational and research purposes.
 
