@@ -318,6 +318,25 @@ The system heavily utilizes Java's `java.util.concurrent.BlockingQueue` (specifi
 
 ## 7. Deep Dive: Each Component
 
+### DPIEngine.java
+
+**Purpose:** The main orchestrator of the entire system.
+- Initializes all thread pools (`LoadBalancer` and `FastPath` threads).
+- Manages the `PcapReader` to ingest packets and the `PcapWriter` to output them.
+- Coordinates the consistent hashing routing mechanism.
+
+### LoadBalancer.java & FastPath.java
+
+**Purpose:** The core of the multi-threaded architecture.
+- **LoadBalancer:** Acts as an intermediary router. It receives packets from the main Reader thread and distributes them to its assigned `FastPath` threads using consistent hashing.
+- **FastPath:** The actual worker thread. It pulls packets from its queue, executes the full protocol parsing, performs Deep Packet Inspection (SNI extraction), checks blocking rules, and updates flow states.
+
+### RuleManager.java & FlowManager.java
+
+**Purpose:** Enforcing policy and tracking state.
+- **RuleManager:** Stores all user-defined blocking policies (IPs, Domains, Apps, Ports). Evaluates each parsed packet against these lists.
+- **FlowManager:** Maintains the active flow table (`HashMap<FiveTuple, Connection>`). It ensures that once a connection is identified (e.g., as YouTube) and blocked, all subsequent packets for that same connection are automatically dropped.
+
 ### PcapReader.java
 
 **Purpose:** Read network captures saved by Wireshark in Java using `DataInputStream`.
